@@ -1,81 +1,124 @@
 ﻿using UnityEngine;
 
-public class ShipScrollerController : MonoBehaviour
+public class PlayerController : MonoBehaviour
 {
-    [Header("Forward Speed")]
-    public float minSpeed = 3f;       // always drifting forward
-    public float maxSpeed = 12f;
-    public float accel = 8f;          // W increases speed
-    public float decel = 6f;          // S decreases speed
+    [Header("Forward Speed Settings")]
+    public float minSpeed = 3f;          // Minimum forward speed (constant drifting forward)
+    public float maxSpeed = 12f;         // Maximum forward speed
+    public float accel = 8f;             // Acceleration rate when pressing W / Up
+    public float decel = 6f;             // Deceleration rate when pressing S / Down
     private float currentSpeed;
 
-    [Header("Lateral Movement")]
-    public float lateralSpeed = 8f;   // left/right slide speed
-    public float lateralSmoothing = 12f; // how snappy the slide feels
-    public float xClamp = 7.5f;       // optional: limit horizontal range
+    [Header("Lateral Movement Settings")]
+    public float lateralSpeed = 8f;      // Speed for left/right movement
+    public float lateralSmoothing = 12f; // Smoothness factor for lateral movement
+    public float xClamp = 15.5f;         // Limits horizontal movement boundaries
 
-    [Header("Visual Bank (tilt only)")]
-    public Transform model;           // assign the ship mesh child
-    public float bankAngle = 36f;     // visual tilt at full steer
-    public float bankLerp = 10f;
+    [Header("Visual Bank (Ship Tilt)")]
+    public Transform model;              // Reference to ship mesh to tilt visually
+    public float bankAngle = 36f;        // Maximum tilt angle (degrees) when steering fully
+    public float bankLerp = 10f;         // How quickly the tilt interpolates
 
-    // Internal
-    private float targetX;            // desired world X
-    private float currentX;           // smoothed world X
+    // Internal state tracking
+    private float targetX;               // Target X position based on input
+    private float currentX;              // Smoothed current X position for smooth lateral movement
+    private float fixedY;                // Locked Y position to prevent vertical drifting
+
+    private Rigidbody playerRb;          // Rigidbody component reference
 
     void Start()
     {
+        // Cache Rigidbody and verify it exists
+        playerRb = GetComponent<Rigidbody>();
+        if (playerRb == null)
+        {
+            Debug.LogError("Rigidbody component missing from ship!");
+        }
+
+        // Lock Y position to initial value to prevent vertical drifting
+        fixedY = transform.position.y;
+
+        // Initialize current speed to minimum speed or higher if already set
         currentSpeed = Mathf.Max(minSpeed, currentSpeed);
-        // Ensure the ship faces world-forward (Z+)
+
+        // Reset rotation to face forward along world Z+ axis
         transform.rotation = Quaternion.identity;
+
+        // Initialize lateral position trackers
         targetX = transform.position.x;
         currentX = targetX;
     }
 
     void Update()
     {
-        // ---- Input ----
-        float steer = Input.GetAxis("Horizontal"); // -1..1 (A/D or ←/→)
-        float throttle = Input.GetAxis("Vertical"); // -1..1 (S..W)
+        // Read player input for steering (left/right) and throttle (forward/back)
+        float steer = Input.GetAxis("Horizontal");   // Range: -1 (left) to 1 (right)
+        float throttle = Input.GetAxis("Vertical");  // Range: -1 (slow down) to 1 (speed up)
 
-        // ---- Speed: persistent, no reverse ----
+        // Adjust current forward speed based on throttle input, no reverse allowed
         if (throttle > 0f)
             currentSpeed += accel * throttle * Time.deltaTime;
         else if (throttle < 0f)
             currentSpeed += decel * throttle * Time.deltaTime;
 
-        currentSpeed = Mathf.Clamp(currentSpeed, minSpeed, maxSpeed);
+        ClampSpeedAndPosition();
 
-        // ---- Lateral movement ----
+        // Update lateral target position based on steering input
         targetX += steer * lateralSpeed * Time.deltaTime;
-        if (xClamp > 0f)
-            targetX = Mathf.Clamp(targetX, -xClamp, xClamp);
 
-        // Smooth X for nicer motion
+        // Smooth lateral movement for natural sliding effect
         currentX = Mathf.Lerp(currentX, targetX, 1f - Mathf.Exp(-lateralSmoothing * Time.deltaTime));
 
-        // Keep forward direction fixed (world Z+); move forward + slide X
-        Vector3 pos = transform.position;
-        pos.x = currentX;
-        pos += Vector3.forward * currentSpeed * Time.deltaTime;
-        transform.position = pos;
+        // Update visual model tilt based on steering input
+        UpdateVisualModel(steer);
+    }
 
-        // Force heading to face world-forward (no rotation drift)
-        transform.rotation = Quaternion.identity;
+    void FixedUpdate()
+    {
+        // Calculate lateral velocity needed to reach currentX in fixed timestep
+        float lateralVelocity = (currentX - playerRb.position.x) / Time.fixedDeltaTime;
 
-        // ---- Visual bank (tilt the model only) ----
+        Vector3 velocity = new Vector3(lateralVelocity, 0f, currentSpeed);
+        playerRb.linearVelocity = velocity;
+
+        Vector3 lockedPos = playerRb.position;
+        lockedPos.y = fixedY;
+        playerRb.position = lockedPos;
+
+        // Reset rotation to identity to prevent physics-induced rotation drift
+        playerRb.rotation = Quaternion.identity;
+    }
+
+    void UpdateVisualModel(float steer)
+    {
         if (model != null)
         {
-            float targetBank = -steer * bankAngle; // Z-axis tilt
-            float targetYaw = steer * bankAngle * 0.5f; // Y-axis turn amount
+            // Calculate desired bank (roll) and yaw rotation angles based on steering input
+            float targetBank = -steer * bankAngle;          // Roll (Z-axis)
+            float targetYaw = steer * bankAngle * 0.5f;     // Yaw (Y-axis)
 
             Quaternion targetRot = Quaternion.Euler(0f, targetYaw, targetBank);
-            model.localRotation = Quaternion.Slerp(
-                model.localRotation,
-                targetRot,
-                bankLerp * Time.deltaTime
-            );
-        }
 
+            if (Mathf.Approximately(steer, 0f))
+            {
+                // No steering input: smoothly return model to neutral rotation
+                model.localRotation = Quaternion.Slerp(model.localRotation, Quaternion.identity, bankLerp * Time.deltaTime);
+            }
+            else
+            {
+                // Steering input active: smoothly tilt towards target banking rotation
+                model.localRotation = Quaternion.Slerp(model.localRotation, targetRot, bankLerp * Time.deltaTime);
+            }
+        }
+    }
+
+    void ClampSpeedAndPosition()
+    {
+        // Clamp speed to defined minimum and maximum
+        currentSpeed = Mathf.Clamp(currentSpeed, minSpeed, maxSpeed);
+
+        // Clamp lateral position to stay within defined horizontal bounds
+        if (xClamp > 0f)
+            targetX = Mathf.Clamp(targetX, -xClamp, xClamp);
     }
 }
